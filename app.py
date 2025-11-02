@@ -310,17 +310,39 @@ def build_taf(df, metar, issue_dt, validity):
 
     # deteksi periode signifikan
     becmg_periods, tempo_periods = [], []
-    for i in range(1, len(df)):
-    t = df.iloc[i]
-    tcode = tcc_to_cloud(t.CC)
-    tvis = int(float(t.VIS)) if not pd.isna(t.VIS) else 9999
-    tstart = df.iloc[i - 1]["time"].strftime("%d%H")
-    tend = t["time"].strftime("%d%H")
+    # === Deteksi periode signifikan dengan ambang ICAO ===
+WIND_CHANGE_THRESHOLD_DEG = 60
+WIND_SPEED_THRESHOLD_KT = 10
+CLOUD_CHANGE_THRESHOLD = 25  # persen
 
-    if t.wind_change:
-        becmg_periods.append(f"BECMG {tstart}/{tend} {int(t.WD):03d}{int(t.WS):02d}KT {tvis:04d} {tcode}")
-    if t.precip:
-        tempo_periods.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
+for i in range(1, len(df)):
+    prev = df.iloc[i - 1]
+    curr = df.iloc[i]
+
+    tstart = prev["time"].strftime("%d%H")
+    tend = curr["time"].strftime("%d%H")
+    tcode = tcc_to_cloud(curr.CC)
+    tvis = int(float(curr.VIS)) if not pd.isna(curr.VIS) else 9999
+
+    # deteksi perubahan signifikan arah/kecepatan angin
+    wd_diff = abs((curr.WD or 0) - (prev.WD or 0))
+    ws_diff = abs((curr.WS or 0) - (prev.WS or 0))
+    cc_diff = abs((curr.CC or 0) - (prev.CC or 0))
+
+    significant_wind = wd_diff >= WIND_CHANGE_THRESHOLD_DEG or ws_diff >= WIND_SPEED_THRESHOLD_KT
+    significant_cloud = cc_diff >= CLOUD_CHANGE_THRESHOLD
+
+    if significant_wind or significant_cloud:
+        becmg_periods.append(
+            f"BECMG {tstart}/{tend} {int(curr.WD):03d}{int(curr.WS):02d}KT {tvis:04d} {tcode}"
+        )
+
+    # deteksi potensi fenomena sementara (hujan, badai)
+    if (curr["CC"] > 80) and (curr["RH"] > 85):
+        tempo_periods.append(
+            f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB"
+        )
+
 
     # === Tambahkan hasil periodik (jika ada) ===
     if becmg_periods:
