@@ -161,48 +161,85 @@ def fetch_metar_ogimet(station="WARR"):
     except: return None
 
 # === Fusion ===
-def build_fused(bmkg,gfs,ecmwf,icon,w,hours=24):
-    dfs=[d for d in [om_to_df(gfs,"GFS"),om_to_df(ecmwf,"ECMWF"),om_to_df(icon,"ICON")] if d is not None]
-    if not dfs: return None
-    df=dfs[0][["time"]]
-    for d in dfs: df=pd.merge(df,d,on="time",how="outer")
-    if bmkg and bmkg.get("status")=="OK":
-        df_b=bmkg_to_df_sedatigede(bmkg["cuaca"])
-        df=pd.merge(df,df_b,on="time",how="outer")
-    out=[]
-    for _,r in df.iterrows():
-        vals={"T":[],"RH":[],"CC":[],"VIS":[],"U":[],"V":[],"w":[]}
-        for key in ["bmkg","ecmwf","icon","gfs"]:
-            wt=w[key]; tag=key.upper()
-            t=r.get(f"T_{tag}") if tag!="BMKG" else r.get("T_BMKG")
-            rh=r.get(f"RH_{tag}") if tag!="BMKG" else r.get("RH_BMKG")
-            cc=r.get(f"CC_{tag}") if tag!="BMKG" else r.get("CC_BMKG")
-            vis=r.get(f"VIS_{tag}") if tag!="BMKG" else r.get("VIS_BMKG")
-            ws=r.get(f"WS_{tag}") if tag!="BMKG" else r.get("WS_BMKG")
-            wd=r.get(f"WD_{tag}") if tag!="BMKG" else r.get("WD_BMKG")
-            if t: vals["T"].append(t)
-            if rh: vals["RH"].append(rh)
-            if cc: vals["CC"].append(cc)
+def build_fused(bmkg, gfs, ecmwf, icon, w, hours=24):
+    dfs = [d for d in [om_to_df(gfs, "GFS"), om_to_df(ecmwf, "ECMWF"), om_to_df(icon, "ICON")] if d is not None]
+    if not dfs:
+        return None
+
+    # pastikan semua kolom time bertipe datetime
+    for d in dfs:
+        if "time" in d.columns:
+            d["time"] = pd.to_datetime(d["time"], errors="coerce")
+    df = dfs[0][["time"]]
+    for d in dfs[1:]:
+        df = pd.merge(df, d, on="time", how="outer")
+
+    # tambahkan BMKG jika ada
+    if bmkg and bmkg.get("status") == "OK":
+        df_b = bmkg_to_df_sedatigede(bmkg["cuaca"])
+        if not df_b.empty:
+            df_b["time"] = pd.to_datetime(df_b["time"], errors="coerce")
+            df = pd.merge(df, df_b, on="time", how="outer")
+
+    # drop baris tanpa waktu valid
+    df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+
+    out = []
+    for _, r in df.iterrows():
+        vals = {"T": [], "RH": [], "CC": [], "VIS": [], "U": [], "V": [], "w": []}
+        for key in ["bmkg", "ecmwf", "icon", "gfs"]:
+            wt = w[key]
+            tag = key.upper()
+            t = r.get(f"T_{tag}") if tag != "BMKG" else r.get("T_BMKG")
+            rh = r.get(f"RH_{tag}") if tag != "BMKG" else r.get("RH_BMKG")
+            cc = r.get(f"CC_{tag}") if tag != "BMKG" else r.get("CC_BMKG")
+            vis = r.get(f"VIS_{tag}") if tag != "BMKG" else r.get("VIS_BMKG")
+            ws = r.get(f"WS_{tag}") if tag != "BMKG" else r.get("WS_BMKG")
+            wd = r.get(f"WD_{tag}") if tag != "BMKG" else r.get("WD_BMKG")
+
+            if t is not None:
+                vals["T"].append(t)
+            if rh is not None:
+                vals["RH"].append(rh)
+            if cc is not None:
+                vals["CC"].append(cc)
             if vis:
-                try: vals["VIS"].append(float(vis))
-                except: pass
+                try:
+                    vals["VIS"].append(float(vis))
+                except:
+                    pass
             if ws and wd:
-                u,v=wind_to_uv(ws,wd)
-                vals["U"].append(u); vals["V"].append(v)
+                u, v = wind_to_uv(ws, wd)
+                vals["U"].append(u)
+                vals["V"].append(v)
             vals["w"].append(wt)
-        if not vals["w"]: continue
-        ws_=vals["w"]
-        T=weighted_mean(vals["T"],ws_)
-        RH=weighted_mean(vals["RH"],ws_)
-        CC=weighted_mean(vals["CC"],ws_)
-        VIS=weighted_mean(vals["VIS"],ws_)
-        U=weighted_mean(vals["U"],ws_)
-        V=weighted_mean(vals["V"],ws_)
-        WS,WD=uv_to_wind(U,V)
-        out.append({"time":r["time"],"T":T,"RH":RH,"CC":CC,"VIS":VIS,"WS":WS,"WD":WD})
-    df_out=pd.DataFrame(out)
-    now=pd.to_datetime(datetime.utcnow()).floor("H")
-    return df_out[df_out["time"]>=now].head(hours)
+
+        if not vals["w"]:
+            continue
+
+        ws_ = vals["w"]
+        T = weighted_mean(vals["T"], ws_)
+        RH = weighted_mean(vals["RH"], ws_)
+        CC = weighted_mean(vals["CC"], ws_)
+        VIS = weighted_mean(vals["VIS"], ws_)
+        U = weighted_mean(vals["U"], ws_)
+        V = weighted_mean(vals["V"], ws_)
+        WS, WD = uv_to_wind(U, V)
+        out.append({
+            "time": r["time"],
+            "T": T,
+            "RH": RH,
+            "CC": CC,
+            "VIS": VIS,
+            "WS": WS,
+            "WD": WD
+        })
+
+    df_out = pd.DataFrame(out)
+    if df_out.empty:
+        return None
+    now = pd.to_datetime(datetime.utcnow()).floor("H")
+    return df_out[df_out["time"] >= now].head(hours)
 
 # === TAFOR builder ===
 def tcc_to_cloud(cc):
