@@ -64,10 +64,21 @@ def uv_to_wind(u, v):
     return spd, deg
 
 def weighted_mean(vals, ws):
+    """Hitung rata-rata berbobot dengan panjang aman"""
     arr = np.array([np.nan if v is None else v for v in vals], float)
     w = np.array(ws, float)
+
+    # samakan panjang antara arr dan w
+    n = min(len(arr), len(w))
+    if n == 0:
+        return np.nan
+    arr = arr[:n]
+    w = w[:n]
+
     mask = ~np.isnan(arr)
-    return float((arr[mask]*w[mask]).sum()/w[mask].sum()) if mask.sum() else np.nan
+    if not mask.any():
+        return np.nan
+    return float(np.nansum(arr[mask] * w[mask]) / np.nansum(w[mask]))
 
 # === Fetch BMKG optimized ===
 @st.cache_data(ttl=REFRESH_TTL)
