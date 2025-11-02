@@ -1,12 +1,13 @@
-# app_pro_operational.py
+# app_pro_operational_v2_3_sedatigede.py
 """
-TAFOR Fusion Pro — Operational version for Forecaster WARR (Sedati Gede)
+TAFOR Fusion Pro — Operational (WARR / Sedati Gede)
+Updated ADM4: 35.15.17.2011 (Sedati Gede)
 Sources:
  - BMKG ADM4 (adm4=35.15.17.2011)
  - Open-Meteo model endpoints: gfs, ecmwf, icon
  - METAR realtime via OGIMET (fallback NOAA)
 Outputs:
- - Fused hourly forecast (24/validity hours)
+ - Fused hourly forecast (validity hours)
  - Probabilistic flags (PoP) for rain/TS/low-vis
  - TAF-like product (ICAO + Perka-aware)
  - Export JSON/CSV to ./output/
@@ -26,9 +27,9 @@ import matplotlib.pyplot as plt
 # -----------------------
 # Basic config
 # -----------------------
-st.set_page_config(page_title="TAFOR Fusion Pro — Operational (WARR)", layout="centered")
-st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede)")
-st.caption("Fusi BMKG ADM4 + Open-Meteo (GFS/ECMWF/ICON) + METAR realtime — untuk Forecaster WARR")
+st.set_page_config(page_title="TAFOR Fusion Pro — Operational (WARR / Sedati Gede)", layout="centered")
+st.title("🛫 TAFOR Fusion Pro — Operational (WARR)")
+st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG ADM4 + Open-Meteo (GFS/ECMWF/ICON) + METAR realtime")
 
 # create output folder
 os.makedirs("output", exist_ok=True)
@@ -36,10 +37,10 @@ os.makedirs("output", exist_ok=True)
 # logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# constants
+# constants (updated to Sedati Gede)
 LAT, LON = -7.379, 112.787
-ADM4 = "35.15.17.2001"
-REFRESH_TTL = 600  # cache TTL
+ADM4 = "35.15.17.2011"   # Sedati Gede (updated)
+REFRESH_TTL = 600  # cache TTL seconds
 DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
 # -----------------------
@@ -71,7 +72,6 @@ st.divider()
 # Helpers: wind & stats
 # -----------------------
 def wind_to_uv(speed, deg):
-    """Convert meteorological wind (dir from) to u,v components (same units)."""
     if speed is None or deg is None or math.isnan(speed) or math.isnan(deg):
         return np.nan, np.nan
     theta = math.radians((270.0 - deg) % 360.0)
@@ -98,7 +98,6 @@ def safe_int(x, default=0):
         return default
 
 def weighted_mean(vals, ws):
-    """Safe weighted mean. vals & ws lists may differ lengths; use element-wise up to min len."""
     if not vals or not ws:
         return np.nan
     arr = np.array([np.nan if v is None else v for v in vals], dtype=float)
@@ -131,16 +130,14 @@ def fetch_bmkg(adm4=ADM4, local_fallback="JSON_BMKG.txt"):
                 data = json.load(f)
         else:
             return {"status": "Unavailable"}
-    # robust parse: expected data["data"][0]["cuaca"][0][0] but be defensive
+    # robust parse attempt
     try:
         cuaca = data["data"][0]["cuaca"][0][0]
         return {"status": "OK", "raw": data, "cuaca": cuaca}
     except Exception:
-        # try different variants: if cuaca is nested list of dicts
         try:
             c = data.get("data", [{}])[0].get("cuaca")
             if isinstance(c, list):
-                # flatten
                 flattened = []
                 for item in c:
                     if isinstance(item, list):
@@ -148,10 +145,7 @@ def fetch_bmkg(adm4=ADM4, local_fallback="JSON_BMKG.txt"):
                             flattened.append(sub)
                     else:
                         flattened.append(item)
-                # pick first dict-like sequence if present
-                for fld in flattened:
-                    if isinstance(fld, dict):
-                        return {"status": "OK", "raw": data, "cuaca": flattened}
+                return {"status": "OK", "raw": data, "cuaca": flattened}
         except Exception:
             pass
     return {"status": "Unavailable", "raw": data}
@@ -176,31 +170,23 @@ def fetch_openmeteo(model):
 
 @st.cache_data(ttl=REFRESH_TTL)
 def fetch_metar_ogimet(station="WARR"):
-    """Try OGIMET (HTML), fallback to NOAA text file."""
-    # OGIMET quick parse: read page and extract lines containing station
     try:
         og = requests.get(f"https://ogimet.com/display_metars2.php?lang=en&icao={station}", timeout=10)
         if og.ok:
             text = og.text
-            # find METAR pattern lines—simple heuristic
             lines = [ln.strip() for ln in text.splitlines() if station in ln]
             if lines:
                 last = lines[-1]
-                # cleanup html tags if present
                 import re
                 last = re.sub("<[^<]+?>", "", last)
-                # try extract METAR substring (after station code)
                 idx = last.find(station)
                 if idx >= 0:
-                    metar = last[idx:].split()[0:10]
                     return " ".join(last[idx:].split())
     except Exception as e:
         logging.warning("OGIMET failed: %s", e)
-    # NOAA fallback
     try:
         r = requests.get(f"https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT", timeout=10)
         if r.ok:
-            # last line typically METAR
             lines = r.text.strip().splitlines()
             return lines[-1].strip()
     except Exception as e:
@@ -211,14 +197,8 @@ def fetch_metar_ogimet(station="WARR"):
 # Parsers & converters
 # -----------------------
 def bmkg_cuaca_to_df(cuaca):
-    """
-    Convert BMKG cuaca (optimised for Sedati Gede) to DataFrame.
-    Accepts dict, list, nested list. Returns hourly rows with time & numeric fields.
-    """
-    # Flatten if nested lists
     records = []
     if isinstance(cuaca, dict):
-        # sometimes cuaca is dict with time keys
         records = [cuaca]
     elif isinstance(cuaca, list):
         for item in cuaca:
@@ -235,7 +215,6 @@ def bmkg_cuaca_to_df(cuaca):
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        # possible time keys
         dt = rec.get("datetime") or rec.get("time") or rec.get("jamCuaca") or rec.get("date") or rec.get("valid_time")
         if isinstance(dt, str):
             try:
@@ -254,7 +233,7 @@ def bmkg_cuaca_to_df(cuaca):
             t0 = None
         if t0 is None:
             continue
-        times.append(t0.tz_convert("UTC").tz_localize(None))  # store naive UTC
+        times.append(t0.tz_convert("UTC").tz_localize(None))
         tvals.append(safe_to_float(rec.get("t") or rec.get("temp") or rec.get("temperature")))
         rhvals.append(safe_to_float(rec.get("hu") or rec.get("rh") or rec.get("humidity")))
         tccvals.append(safe_to_float(rec.get("tcc") or rec.get("cloud") or rec.get("cloud_cover")))
@@ -278,7 +257,6 @@ def bmkg_cuaca_to_df(cuaca):
     return df
 
 def openmeteo_json_to_df(j, tag):
-    """Convert Open-Meteo hourly to dataframe with columns time + vars prefixed by tag."""
     if not j or "hourly" not in j:
         return None
     h = j["hourly"]
@@ -295,8 +273,6 @@ def openmeteo_json_to_df(j, tag):
 # Align / fuse functions
 # -----------------------
 def align_hourly(dfs):
-    """Given list of dfs with a 'time' column (datetime), merge on hourly times (outer) and sort."""
-    # normalize time column type
     normalized = []
     for d in dfs:
         if d is None:
@@ -304,7 +280,6 @@ def align_hourly(dfs):
         if "time" in d.columns:
             d["time"] = pd.to_datetime(d["time"], errors="coerce")
             d = d.dropna(subset=["time"])
-            # make naive UTC (remove tz)
             try:
                 d["time"] = d["time"].dt.tz_convert("UTC").dt.tz_localize(None)
             except Exception:
@@ -322,19 +297,15 @@ def align_hourly(dfs):
     return base
 
 def fuse_ensemble(df_merged, weights, hours=24):
-    """Compute fused hourly variables using weighted mean; wind vector fusion included."""
     rows = []
-    # ensure time sorted and only horizon
     now = pd.to_datetime(datetime.utcnow()).floor("H")
     df_merged = df_merged.sort_values("time").reset_index(drop=True)
     df_merged = df_merged[df_merged["time"] >= now].head(hours)
 
     for _, r in df_merged.iterrows():
-        # collect per-source values arrays in same order as weights
         T_vals, RH_vals, CC_vals, VIS_vals = [], [], [], []
         u_vals, v_vals = [], []
         w_list = []
-        # BMKG
         if weights.get("bmkg", 0) > 0:
             t = r.get("T_BMKG"); rh = r.get("RH_BMKG"); cc = r.get("CC_BMKG")
             ws = r.get("WS_BMKG"); wd = r.get("WD_BMKG"); vis = r.get("VIS_BMKG")
@@ -342,13 +313,12 @@ def fuse_ensemble(df_merged, weights, hours=24):
             if not pd.isna(rh): RH_vals.append(rh)
             if not pd.isna(cc): CC_vals.append(cc)
             try:
-                VIS_vals.append(float(vis))  # may fail; ignore
+                VIS_vals.append(float(vis))
             except Exception:
                 pass
             if not pd.isna(ws) and not pd.isna(wd):
                 u, v = wind_to_uv(ws, wd); u_vals.append(u); v_vals.append(v)
             w_list.append(weights["bmkg"])
-        # Open-Meteo models
         for model in ["ecmwf", "icon", "gfs"]:
             tag = model.upper()
             wt = weights.get(model, 0)
@@ -368,7 +338,6 @@ def fuse_ensemble(df_merged, weights, hours=24):
             w_list.append(wt)
         if not w_list:
             continue
-        # compute fused
         T_f = weighted_mean(T_vals, w_list)
         RH_f = weighted_mean(RH_vals, w_list)
         CC_f = weighted_mean(CC_vals, w_list)
@@ -385,12 +354,6 @@ def fuse_ensemble(df_merged, weights, hours=24):
 # Probabilistic metrics
 # -----------------------
 def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"]):
-    """
-    Simple PoP-like calculation:
-    - For each hour, check how many sources predict 'precip flag' (CC>=80 & RH>=85 or cloud convective)
-    - probability = count / n_models
-    Also compute ensemble spread for temperature (std deviation).
-    """
     probs = []
     for _, r in df_merged.iterrows():
         votes = 0
@@ -429,7 +392,6 @@ def tcc_to_cloud_label(cc):
     else: return "OVC030"
 
 def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validity):
-    """Return TAF lines (list) and signif_times list (datetimes)."""
     taf_lines = []
     header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
     taf_lines.append(header)
@@ -437,7 +399,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
         taf_lines += ["00000KT 9999 FEW020", "NOSIG", "RMK AUTO FUSION BASED ON MODEL ONLY"]
         return taf_lines, []
 
-    # baseline: first hour
     first = df_fused.iloc[0]
     wd = safe_int(first.WD, 90)
     ws = safe_int(first.WS, 5)
@@ -445,7 +406,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     cloud = tcc_to_cloud_label(first.CC)
     taf_lines.append(f"{wd:03d}{ws:02d}KT {vis:04d} {cloud}")
 
-    # detect changes with thresholds that match BMKG/ICAO guidance
     WIND_CHANGE_DEG = 60
     WIND_SPEED_KT = 10
     CLOUD_CHANGE_PCT = 25
@@ -456,7 +416,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     for i in range(1, len(df_fused)):
         prev = df_fused.iloc[i - 1]
         curr = df_fused.iloc[i]
-        # indexes in merged df for flags / models are aligned by time, use df_merged_for_flags
         tstart = prev["time"].strftime("%d%H")
         tend = curr["time"].strftime("%d%H")
         wd_diff = abs((curr.WD or 0) - (prev.WD or 0))
@@ -470,7 +429,6 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
             becmg.append(f"BECMG {tstart}/{tend} {safe_int(curr.WD):03d}{safe_int(curr.WS):02d}KT {safe_int(curr.VIS or 9999):04d} {tcc_to_cloud_label(curr.CC)}")
             signif_times.append(curr["time"])
 
-        # tempo if precip flagged by fused metrics (PoP or CC&RH)
         precip_flag = (curr.CC and curr.CC >= 80 and curr.RH and curr.RH >= 85)
         if precip_flag:
             tempo.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
@@ -519,7 +477,6 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
 
     st.success("✅ Data fetched (or fallback used). Processing fusion...")
 
-    # Build merged dataframe (for flags & PoP)
     df_gfs = openmeteo_json_to_df(gfs_json, "GFS")
     df_ecmwf = openmeteo_json_to_df(ecmwf_json, "ECMWF")
     df_icon = openmeteo_json_to_df(icon_json, "ICON")
@@ -536,20 +493,16 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
         st.error("Fusion failed / empty result.")
         st.stop()
 
-    # probabilities & spread
     df_probs = compute_probabilities(df_merged)
 
-    # TAF
     taf_lines, signif_times = build_taf_from_fused(df_fused, df_merged, metar, issue_dt, validity)
     taf_html = "<br>".join(taf_lines)
 
-    # export
     json_file, csv_file = export_results(df_fused, df_probs, taf_lines, issue_dt)
 
-    # Display
     st.subheader("📊 Source summary")
     st.write({
-        "BMKG ADM4": "OK" if bmkg.get("status") == "OK" else "Unavailable",
+        "BMKG ADM4 (Sedati Gede 35.15.17.2011)": "OK" if bmkg.get("status") == "OK" else "Unavailable",
         "GFS": "OK" if gfs_json else "Unavailable",
         "ECMWF": "OK" if ecmwf_json else "Unavailable",
         "ICON": "OK" if icon_json else "Unavailable",
@@ -565,13 +518,11 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.caption(f"Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d/%H}–{valid_to:%d/%H} UTC")
 
     st.markdown("### 📈 Fused 24h (T/RH/Cloud/WS) & Significant changes")
-    # plot with requested colors
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(df_fused["time"], df_fused["T"], label="T (°C)", color="red")
     ax.plot(df_fused["time"], df_fused["RH"], label="RH (%)", color="green")
     ax.plot(df_fused["time"], df_fused["CC"], label="Cloud (%)", color="gray")
     ax.plot(df_fused["time"], df_fused["WS"], label="Wind (kt)", color="blue")
-    # vertical lines for significant times
     for t in signif_times:
         ax.axvline(t, color="orange", linestyle="--", alpha=0.6)
     ax.legend(); ax.grid(True, linestyle="--", alpha=0.4)
@@ -588,4 +539,4 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     with st.expander("🔍 Debug: raw BMKG JSON"):
         st.write(bmkg.get("raw"))
 
-    st.success("✅ Operational TAFOR (fusion) created and exported. Validate before operational release.")
+    st.success("✅ Operational TAFOR (fusion) created and exported. PLEASE VALIDATE before operational release.")
