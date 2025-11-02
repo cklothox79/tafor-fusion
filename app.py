@@ -1,17 +1,12 @@
-# app_pro_operational_v2_3_sedatigede.py
+# app_pro_operational_v2_4.py
 """
-TAFOR Fusion Pro — Operational (WARR / Sedati Gede)
-Updated ADM4: 35.15.17.2011 (Sedati Gede)
-Sources:
- - BMKG ADM4 (adm4=35.15.17.2011)
- - Open-Meteo model endpoints: gfs, ecmwf, icon
- - METAR realtime via OGIMET (fallback NOAA)
-Outputs:
- - Fused hourly forecast (validity hours)
- - Probabilistic flags (PoP) for rain/TS/low-vis
- - TAF-like product (ICAO + Perka-aware)
- - Export JSON/CSV to ./output/
+TAFOR Fusion Pro — Operational v2.4 (WARR / Sedati Gede)
+Adds:
+ - daily logging to ./logs/
+ - auto-alerts for PoP/Wind/High RH+CC
+ADM4: 35.15.17.2011 (Sedati Gede)
 """
+
 import os
 import json
 import logging
@@ -27,24 +22,25 @@ import matplotlib.pyplot as plt
 # -----------------------
 # Basic config
 # -----------------------
-st.set_page_config(page_title="TAFOR Fusion Pro — Operational (WARR / Sedati Gede)", layout="centered")
-st.title("🛫 TAFOR Fusion Pro — Operational (WARR)")
-st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG ADM4 + Open-Meteo (GFS/ECMWF/ICON) + METAR realtime")
+st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.4 (WARR)", layout="centered")
+st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede)")
+st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
-# create output folder
+# create folders
 os.makedirs("output", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
 
-# logging
+# logging basic
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# constants (updated to Sedati Gede)
+# constants
 LAT, LON = -7.379, 112.787
-ADM4 = "35.15.17.2011"   # Sedati Gede (updated)
+ADM4 = "35.15.17.2011"
 REFRESH_TTL = 600  # cache TTL seconds
 DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
 # -----------------------
-# UI: inputs
+# UI Inputs
 # -----------------------
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -69,21 +65,22 @@ st.caption(f"Normalized weights: {weights}")
 st.divider()
 
 # -----------------------
-# Helpers: wind & stats
+# Helpers
 # -----------------------
 def wind_to_uv(speed, deg):
-    if speed is None or deg is None or math.isnan(speed) or math.isnan(deg):
+    if speed is None or deg is None or (isinstance(speed, float) and math.isnan(speed)) or (isinstance(deg, float) and math.isnan(deg)):
         return np.nan, np.nan
     theta = math.radians((270.0 - deg) % 360.0)
     return speed * math.cos(theta), speed * math.sin(theta)
 
 def uv_to_wind(u, v):
-    if u is None or v is None or np.isnan(u) or np.isnan(v):
+    try:
+        spd = math.sqrt(u * u + v * v)
+        theta = math.degrees(math.atan2(v, u))
+        deg = (270.0 - theta) % 360.0
+        return spd, deg
+    except Exception:
         return np.nan, np.nan
-    spd = math.sqrt(u * u + v * v)
-    theta = math.degrees(math.atan2(v, u))
-    deg = (270.0 - theta) % 360.0
-    return spd, deg
 
 def safe_to_float(x):
     try:
@@ -130,7 +127,6 @@ def fetch_bmkg(adm4=ADM4, local_fallback="JSON_BMKG.txt"):
                 data = json.load(f)
         else:
             return {"status": "Unavailable"}
-    # robust parse attempt
     try:
         cuaca = data["data"][0]["cuaca"][0][0]
         return {"status": "OK", "raw": data, "cuaca": cuaca}
@@ -233,7 +229,14 @@ def bmkg_cuaca_to_df(cuaca):
             t0 = None
         if t0 is None:
             continue
-        times.append(t0.tz_convert("UTC").tz_localize(None))
+        # store naive UTC
+        try:
+            times.append(t0.tz_convert("UTC").tz_localize(None))
+        except Exception:
+            try:
+                times.append(t0.tz_localize(None))
+            except Exception:
+                times.append(pd.to_datetime(t0))
         tvals.append(safe_to_float(rec.get("t") or rec.get("temp") or rec.get("temperature")))
         rhvals.append(safe_to_float(rec.get("hu") or rec.get("rh") or rec.get("humidity")))
         tccvals.append(safe_to_float(rec.get("tcc") or rec.get("cloud") or rec.get("cloud_cover")))
@@ -270,7 +273,7 @@ def openmeteo_json_to_df(j, tag):
     return df
 
 # -----------------------
-# Align / fuse functions
+# Align & Fuse
 # -----------------------
 def align_hourly(dfs):
     normalized = []
@@ -351,7 +354,7 @@ def fuse_ensemble(df_merged, weights, hours=24):
     return pd.DataFrame(rows)
 
 # -----------------------
-# Probabilistic metrics
+# Probabilities
 # -----------------------
 def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"]):
     probs = []
@@ -377,7 +380,7 @@ def compute_probabilities(df_merged, models_list=["GFS", "ECMWF", "ICON", "BMKG"
     return pd.DataFrame(probs)
 
 # -----------------------
-# TAF generator (ICAO + Perka-aware)
+# TAF builder
 # -----------------------
 def tcc_to_cloud_label(cc):
     if pd.isna(cc):
@@ -444,7 +447,7 @@ def build_taf_from_fused(df_fused, df_merged_for_flags, metar, issue_dt, validit
     return taf_lines, sorted(list(set(signif_times)))
 
 # -----------------------
-# Export helpers
+# Export
 # -----------------------
 def export_results(df_fused, df_probs, taf_lines, issue_dt):
     stamp = issue_dt.strftime("%Y%m%d_%H%M")
@@ -462,11 +465,10 @@ def export_results(df_fused, df_probs, taf_lines, issue_dt):
     return fname_json, fname_csv
 
 # -----------------------
-# Main action on button
+# MAIN ACTION
 # -----------------------
 if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
-
     st.info("📡 Fetching BMKG / Open-Meteo / METAR ... (please wait)")
 
     bmkg = fetch_bmkg()
@@ -483,7 +485,6 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     df_bmkg = bmkg_cuaca_to_df(bmkg["cuaca"]) if bmkg.get("status") == "OK" else None
 
     df_merged = align_hourly([df_gfs, df_ecmwf, df_icon, df_bmkg])
-
     if df_merged is None:
         st.error("No model data available to fuse.")
         st.stop()
@@ -500,6 +501,9 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
 
     json_file, csv_file = export_results(df_fused, df_probs, taf_lines, issue_dt)
 
+    # -----------------------
+    # DISPLAY
+    # -----------------------
     st.subheader("📊 Source summary")
     st.write({
         "BMKG ADM4 (Sedati Gede 35.15.17.2011)": "OK" if bmkg.get("status") == "OK" else "Unavailable",
@@ -517,6 +521,7 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     valid_to = issue_dt + timedelta(hours=validity)
     st.caption(f"Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d/%H}–{valid_to:%d/%H} UTC")
 
+    # Plot
     st.markdown("### 📈 Fused 24h (T/RH/Cloud/WS) & Significant changes")
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(df_fused["time"], df_fused["T"], label="T (°C)", color="red")
@@ -536,7 +541,51 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.write(f"- JSON: `{json_file}`")
     st.write(f"- CSV: `{csv_file}`")
 
+    # -----------------------
+    # LOGGING + ALERTS (NEW)
+    # -----------------------
+    # prepare log entry
+    log_file = f"logs/{issue_dt:%Y%m%d}_tafor_log.csv"
+    taf_text = " | ".join(taf_lines)
+    pop_max = round((df_probs["PoP_precip"].max() if not df_probs.empty else 0.0) * 100, 1)
+    wind_max = round(df_fused["WS"].max() if not df_fused.empty else 0.0, 1)
+    rh_max = round(df_fused["RH"].max() if not df_fused.empty else 0.0, 1)
+    cc_max = round(df_fused["CC"].max() if not df_fused.empty else 0.0, 1)
+
+    alerts = []
+    if pop_max >= 70:
+        alerts.append(f"⚠️ High PoP ({pop_max}%) — possible heavy RA/TS")
+    if wind_max >= 20:
+        alerts.append(f"💨 High wind: {wind_max} kt")
+    if (rh_max >= 90) and (cc_max >= 85):
+        alerts.append("🌫️ High RH & cloud cover — possible low visibility / convective cloud")
+
+    log_df = pd.DataFrame([{
+        "timestamp": datetime.utcnow().isoformat(),
+        "issue_time": f"{issue_dt:%d%H%MZ}",
+        "validity": validity,
+        "metar": metar or "",
+        "taf_text": taf_text,
+        "pop_max_pct": pop_max,
+        "wind_max_kt": wind_max,
+        "rh_max_pct": rh_max,
+        "cc_max_pct": cc_max,
+        "alerts": "; ".join(alerts)
+    }])
+
+    if os.path.exists(log_file):
+        log_df.to_csv(log_file, mode="a", header=False, index=False)
+    else:
+        log_df.to_csv(log_file, index=False)
+
+    # show alerts
+    if alerts:
+        for a in alerts:
+            st.warning(a)
+    else:
+        st.info("✅ No significant alerts detected — conditions stable.")
+
     with st.expander("🔍 Debug: raw BMKG JSON"):
         st.write(bmkg.get("raw"))
 
-    st.success("✅ Operational TAFOR (fusion) created and exported. PLEASE VALIDATE before operational release.")
+    st.success("✅ Operational TAFOR (fusion) created, exported, and logged. PLEASE VALIDATE before operational release.")
