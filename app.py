@@ -311,16 +311,16 @@ def build_taf(df, metar, issue_dt, validity):
     # deteksi periode signifikan
     becmg_periods, tempo_periods = [], []
     for i in range(1, len(df)):
-        t = df.iloc[i]
-        tcode = tcc_to_cloud(t.CC)
-        tvis = int(float(t.VIS)) if not pd.isna(t.VIS) else 9999
-        tstart = df.iloc[i - 1]["time"].strftime("%d%H")
-        tend = t["time"].strftime("%d%H")
+    t = df.iloc[i]
+    tcode = tcc_to_cloud(t.CC)
+    tvis = int(float(t.VIS)) if not pd.isna(t.VIS) else 9999
+    tstart = df.iloc[i - 1]["time"].strftime("%d%H")
+    tend = t["time"].strftime("%d%H")
 
-        if t.wind_change:
-            becmg_periods.append(f"BECMG {tstart}/{tend} {int(t.WD):03d}{int(t.WS):02d}KT {tvis:04d} {tcode}")
-        if t.precip:
-            tempo_periods.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
+    if t.wind_change:
+        becmg_periods.append(f"BECMG {tstart}/{tend} {int(t.WD):03d}{int(t.WS):02d}KT {tvis:04d} {tcode}")
+    if t.precip:
+        tempo_periods.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
 
     # === Tambahkan hasil periodik (jika ada) ===
     if becmg_periods:
