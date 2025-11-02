@@ -279,43 +279,65 @@ def tcc_to_cloud(cc):
     else: return "OVC030"
 
 def build_taf(df, metar, issue_dt, validity):
-    """Buat teks TAF berdasarkan hasil fusi dan METAR"""
-    header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
+    """Bangun TAF resmi (ICAO + Perka BMKG) berdasarkan hasil fusi"""
+    taf_lines = []
 
+    # === HEADER ===
+    taf_header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
+    taf_lines.append(taf_header)
+
+    # === Jika tidak ada data fusi, fallback ===
     if df is None or df.empty:
-        return [header, "9999 FEW020", "NOSIG"]
+        taf_lines += ["00000KT 9999 FEW020", "NOSIG", "RMK AUTO FUSION BASED ON MODEL ONLY"]
+        return taf_lines
 
+    # === Baris dasar ===
     base = df.iloc[0]
-
-    # --- wind ---
-    wind_dir = int(round(base.WD or 0)) if not pd.isna(base.WD) else 0
-    wind_spd = int(round(base.WS or 5)) if not pd.isna(base.WS) else 5
-    wind = f"{wind_dir:03d}{wind_spd:02d}KT"
-
-    # --- visibility ---
+    wd = int(round(base.WD or 0))
+    ws = int(round(base.WS or 5))
     vis = base.VIS
     try:
-        vis_val = int(float(vis)) if not pd.isna(vis) else 9999
-        if vis_val <= 0:
-            vis_val = 9999
+        vis = int(float(vis))
+        if vis <= 0: vis = 9999
     except Exception:
-        vis_val = 9999
-    vis = str(vis_val)
+        vis = 9999
+    cc_code = tcc_to_cloud(base.CC)
+    taf_lines.append(f"{wd:03d}{ws:02d}KT {vis:04d} {cc_code}")
 
-    # --- clouds ---
-    cloud = tcc_to_cloud(base.CC)
-
-    taf = [header, f"{wind} {vis} {cloud}"]
-
-    # --- weather logic ---
+    # === Analisis tren dari data fusi ===
     df["precip"] = (df["CC"] > 80) & (df["RH"] > 85)
-    if any(df["precip"]):
-        taf.append("TEMPO 4000 -RA SCT020CB")
-    else:
-        taf.append("NOSIG")
+    df["wind_change"] = abs(df["WD"] - wd) > 45
 
-    taf.append(f"RMK BASED ON {'METAR' if metar else 'MODEL FUSION'}")
-    return taf
+    # deteksi periode signifikan
+    becmg_periods, tempo_periods = [], []
+    for i in range(1, len(df)):
+        t = df.iloc[i]
+        tcode = tcc_to_cloud(t.CC)
+        tvis = int(float(t.VIS)) if not pd.isna(t.VIS) else 9999
+        tstart = df.iloc[i - 1]["time"].strftime("%d%H")
+        tend = t["time"].strftime("%d%H")
+
+        if t.wind_change:
+            becmg_periods.append(f"BECMG {tstart}/{tend} {int(t.WD):03d}{int(t.WS):02d}KT {tvis:04d} {tcode}")
+        if t.precip:
+            tempo_periods.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
+
+    # === Tambahkan hasil periodik (jika ada) ===
+    if becmg_periods:
+        taf_lines += becmg_periods
+    if tempo_periods:
+        taf_lines += tempo_periods
+
+    # === Jika stabil total, tambahkan NOSIG ===
+    if not becmg_periods and not tempo_periods:
+        taf_lines.append("NOSIG")
+
+    # === Remark akhir ===
+    source_text = "METAR+MODEL FUSION" if metar else "MODEL FUSION"
+    taf_lines.append(f"RMK AUTO FUSION BASED ON {source_text}")
+
+    return taf_lines
+
 
 
 # === Run ===
