@@ -1,15 +1,16 @@
-# app_pro_operational_v2_4.py
+# app.py
 """
 TAFOR Fusion Pro — Operational v2.4 (WARR / Sedati Gede)
-Adds:
- - daily logging to ./logs/
- - auto-alerts for PoP/Wind/High RH+CC
+- Full Streamlit app with styled download buttons and ZIP export
+- Adds: daily logging to ./logs/, auto-alerts for PoP/Wind/High RH+CC
 ADM4: 35.15.17.2011 (Sedati Gede)
 """
 
 import os
+import io
 import json
 import logging
+import zipfile
 from datetime import datetime, timedelta
 import math
 
@@ -24,13 +25,7 @@ import matplotlib.pyplot as plt
 # -----------------------
 st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.4 (WARR)", layout="centered")
 st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede)")
-
-# 👇 Tambahkan nama berdampingan dengan location
-st.caption(
-    "📍 Location: Sedati Gede (ADM4=35.15.17.2011) | **Ferri Kusuma**, NIP.197912222000031001  \n"
-    "Fusion: BMKG + Open-Meteo + METAR realtime"
-)
-
+st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
 # create folders
 os.makedirs("output", exist_ok=True)
@@ -114,6 +109,17 @@ def weighted_mean(vals, ws):
     if w_mask.sum() == 0:
         return float(np.nanmean(arr[mask]))
     return float((arr[mask] * w_mask).sum() / w_mask.sum())
+
+def fmt_bytes(n):
+    try:
+        n = float(n)
+    except Exception:
+        return "0 B"
+    for unit in ["B","KB","MB","GB","TB"]:
+        if n < 1024.0:
+            return f"{n:3.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} PB"
 
 # -----------------------
 # Fetchers (cached)
@@ -530,10 +536,10 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     # Plot
     st.markdown("### 📈 Fused 24h (T/RH/Cloud/WS) & Significant changes")
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(df_fused["time"], df_fused["T"], label="T (°C)", color="red")
-    ax.plot(df_fused["time"], df_fused["RH"], label="RH (%)", color="green")
-    ax.plot(df_fused["time"], df_fused["CC"], label="Cloud (%)", color="gray")
-    ax.plot(df_fused["time"], df_fused["WS"], label="Wind (kt)", color="blue")
+    ax.plot(df_fused["time"], df_fused["T"], label="T (°C)")
+    ax.plot(df_fused["time"], df_fused["RH"], label="RH (%)")
+    ax.plot(df_fused["time"], df_fused["CC"], label="Cloud (%)")
+    ax.plot(df_fused["time"], df_fused["WS"], label="Wind (kt)")
     for t in signif_times:
         ax.axvline(t, color="orange", linestyle="--", alpha=0.6)
     ax.legend(); ax.grid(True, linestyle="--", alpha=0.4)
@@ -543,32 +549,87 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.markdown("### 🔢 Probabilistic Metrics (sample)")
     st.dataframe(df_probs.head(24))
 
-    # === DOWNLOAD SECTION ===
-st.markdown("### 💾 Exported Files")
+    # -----------------------
+    # DOWNLOAD SECTION (Styled)
+    # -----------------------
+    st.markdown("### 💾 Exported Files")
+    st.caption("File hasil fusi otomatis tersimpan di folder `output/`. Pilih tombol untuk mengunduh (CSV / JSON / ZIP).")
 
-# Info paths
-st.write(f"- JSON: `{json_file}`")
-st.write(f"- CSV: `{csv_file}`")
+    # Read file content bytes
+    with open(json_file, "r", encoding="utf-8") as f:
+        json_data = f.read()
+    with open(csv_file, "r", encoding="utf-8") as f:
+        csv_data = f.read()
 
-# Read file content for download
-with open(json_file, "r", encoding="utf-8") as f:
-    json_data = f.read()
-with open(csv_file, "r", encoding="utf-8") as f:
-    csv_data = f.read()
+    # prepare ZIP in-memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(os.path.basename(csv_file), csv_data)
+        zf.writestr(os.path.basename(json_file), json_data)
+    zip_buffer.seek(0)
+    zip_bytes = zip_buffer.read()
 
-# Download buttons
-st.download_button(
-    label="⬇️ Download Fused Data (CSV)",
-    data=csv_data,
-    file_name=os.path.basename(csv_file),
-    mime="text/csv"
-)
-st.download_button(
-    label="⬇️ Download Full Result (JSON)",
-    data=json_data,
-    file_name=os.path.basename(json_file),
-    mime="application/json"
-)
+    # file size info
+    csv_size = os.path.getsize(csv_file) if os.path.exists(csv_file) else 0
+    json_size = os.path.getsize(json_file) if os.path.exists(json_file) else 0
+    zip_size = len(zip_bytes)
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDownloadButton"] > button {
+            border-radius: 10px;
+            height: 3em;
+            padding: 0 1.2em;
+            font-weight: 600;
+            color: white;
+            transition: all 0.12s ease-in-out;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+        }
+        /* first button (CSV) */
+        div[data-testid="stDownloadButton"]:nth-child(1) > button {
+            background: linear-gradient(90deg, #0066cc, #0099ff);
+        }
+        /* second button (JSON) */
+        div[data-testid="stDownloadButton"]:nth-child(2) > button {
+            background: linear-gradient(90deg, #28a745, #6ddf7a);
+        }
+        /* third button (ZIP) */
+        div[data-testid="stDownloadButton"]:nth-child(3) > button {
+            background: linear-gradient(90deg, #6f42c1, #a78bfa);
+        }
+        div[data-testid="stDownloadButton"] > button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 6px 14px rgba(0,0,0,0.2);
+        }
+        </style>
+        """, unsafe_allow_html=True
+    )
+
+    col_csv, col_json, col_zip = st.columns([1,1,1])
+    with col_csv:
+        st.download_button(
+            label=f"⬇️ CSV ({fmt_bytes(csv_size)})",
+            data=csv_data,
+            file_name=os.path.basename(csv_file),
+            mime="text/csv"
+        )
+    with col_json:
+        st.download_button(
+            label=f"📦 JSON ({fmt_bytes(json_size)})",
+            data=json_data,
+            file_name=os.path.basename(json_file),
+            mime="application/json"
+        )
+    with col_zip:
+        st.download_button(
+            label=f"🗜️ ZIP (CSV+JSON) ({fmt_bytes(zip_size)})",
+            data=zip_bytes,
+            file_name=f"fused_{issue_dt.strftime('%Y%m%d_%H%M')}.zip",
+            mime="application/zip"
+        )
+
+    st.success("✅ File berhasil diekspor dan siap diunduh.")
 
     # -----------------------
     # LOGGING + ALERTS (NEW)
