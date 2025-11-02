@@ -2,7 +2,7 @@
 """
 TAFOR Fusion Pro — Operational version for Forecaster WARR (Sedati Gede)
 Sources:
- - BMKG ADM4 (adm4=35.15.17.2001)
+ - BMKG ADM4 (adm4=35.15.17.2011)
  - Open-Meteo model endpoints: gfs, ecmwf, icon
  - METAR realtime via OGIMET (fallback NOAA)
 Outputs:
