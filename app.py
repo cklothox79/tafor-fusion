@@ -24,7 +24,11 @@ import matplotlib.pyplot as plt
 # -----------------------
 st.set_page_config(page_title="TAFOR Fusion Pro — Operational v2.4 (WARR)", layout="centered")
 st.title("🛫 TAFOR Fusion Pro — Operational (WARR / Sedati Gede)")
-st.caption("Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
+
+# === Forecaster Identity ===
+st.markdown("### 👤 **FERRI KUSUMA**  \n197912222000031001")
+
+st.caption("📍 Location: Sedati Gede (ADM4=35.15.17.2011). Fusi BMKG + Open-Meteo + METAR realtime")
 
 # create folders
 os.makedirs("output", exist_ok=True)
