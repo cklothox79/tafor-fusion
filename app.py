@@ -543,9 +543,32 @@ if st.button("🚀 Generate Operational TAFOR (Fusion)"):
     st.markdown("### 🔢 Probabilistic Metrics (sample)")
     st.dataframe(df_probs.head(24))
 
-    st.markdown("### 💾 Exported Files")
-    st.write(f"- JSON: `{json_file}`")
-    st.write(f"- CSV: `{csv_file}`")
+    # === DOWNLOAD SECTION ===
+st.markdown("### 💾 Exported Files")
+
+# Info paths
+st.write(f"- JSON: `{json_file}`")
+st.write(f"- CSV: `{csv_file}`")
+
+# Read file content for download
+with open(json_file, "r", encoding="utf-8") as f:
+    json_data = f.read()
+with open(csv_file, "r", encoding="utf-8") as f:
+    csv_data = f.read()
+
+# Download buttons
+st.download_button(
+    label="⬇️ Download Fused Data (CSV)",
+    data=csv_data,
+    file_name=os.path.basename(csv_file),
+    mime="text/csv"
+)
+st.download_button(
+    label="⬇️ Download Full Result (JSON)",
+    data=json_data,
+    file_name=os.path.basename(json_file),
+    mime="application/json"
+)
 
     # -----------------------
     # LOGGING + ALERTS (NEW)
