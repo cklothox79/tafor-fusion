@@ -1,10 +1,11 @@
 # app_pro_fusion.py
 """
-Auto TAFOR Pro (fusion): BMKG + GFS + ECMWF + ICON -> fused 24h -> auto generate TAFOR
-Save file as app_pro_fusion.py and run:
-    pip install -r requirements.txt
-    streamlit run app_pro_fusion.py
+Auto TAFOR Fusion Pro (BMKG + GFS + ECMWF + ICON)
+- BMKG ADM4 Sedati Gede (35.15.17.2001)
+- Open-Meteo GFS / ECMWF / ICON (global models)
+- Output: fused 24h forecast + TAF-like (ICAO & Perka-aware)
 """
+
 import streamlit as st
 from datetime import datetime, timedelta
 import requests, json, os
@@ -13,22 +14,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from math import radians, cos, sin, atan2, degrees
 
-# --------------------------
-# Config
-# --------------------------
+# === Streamlit setup ===
 st.set_page_config(page_title="🛫 TAFOR Fusion Pro — Sedati Gede", layout="centered")
 st.title("🛫 TAFOR Fusion Pro — Sedati Gede (WARR vicinity)")
 st.caption("Fusi: BMKG (ADM4) + Open-Meteo models (GFS, ECMWF, ICON). Output: TAF-like (ICAO + Perka-aware)")
 st.divider()
 
 LAT, LON = -7.379, 112.787
-REFRESH_TTL = 900  # caching TTL in seconds
-# default ensemble weights (sum doesn't need to be 1, we'll normalize)
+REFRESH_TTL = 900
 DEFAULT_WEIGHTS = {"bmkg": 0.45, "ecmwf": 0.25, "icon": 0.15, "gfs": 0.15}
 
-# --------------------------
-# UI Controls
-# --------------------------
+# === Input UI ===
 col1, col2, col3 = st.columns(3)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
@@ -40,56 +36,42 @@ with col2:
 with col3:
     validity = st.number_input("🕐 Validity (hours)", min_value=6, max_value=36, value=24, step=6)
 
-weights = DEFAULT_WEIGHTS.copy()
+# === Bobot model ===
 st.markdown("**⚙️ Ensemble weights (BMKG prioritas)** — ubah jika perlu")
-w1, w2, w3, w4 = st.columns(4)
-with w1:
-    weights["bmkg"] = st.number_input("BMKG", min_value=0.0, max_value=1.0, value=float(weights["bmkg"]), step=0.05)
-with w2:
-    weights["ecmwf"] = st.number_input("ECMWF", min_value=0.0, max_value=1.0, value=float(weights["ecmwf"]), step=0.05)
-with w3:
-    weights["icon"] = st.number_input("ICON", min_value=0.0, max_value=1.0, value=float(weights["icon"]), step=0.05)
-with w4:
-    weights["gfs"] = st.number_input("GFS", min_value=0.0, max_value=1.0, value=float(weights["gfs"]), step=0.05)
+cols = st.columns(4)
+weights = {}
+weights["bmkg"] = cols[0].number_input("BMKG", 0.0, 1.0, 0.45, step=0.05)
+weights["ecmwf"] = cols[1].number_input("ECMWF", 0.0, 1.0, 0.25, step=0.05)
+weights["icon"] = cols[2].number_input("ICON", 0.0, 1.0, 0.15, step=0.05)
+weights["gfs"] = cols[3].number_input("GFS", 0.0, 1.0, 0.15, step=0.05)
 
-# normalize weights for convenience (if all zero, we'll keep defaults)
-sumw = sum(weights.values())
-if sumw == 0:
-    norm_weights = {k: DEFAULT_WEIGHTS[k] for k in weights}
-else:
-    norm_weights = {k: (v / sumw) for k, v in weights.items()}
-
+sumw = sum(weights.values()) or 1
+norm_weights = {k: v / sumw for k, v in weights.items()}
 st.caption(f"Normalized weights: {', '.join([f'{k}={v:.2f}' for k,v in norm_weights.items()])}")
 
-# --------------------------
-# Helpers: wind conversion and fusion helpers
-# --------------------------
+# === Wind helpers ===
 def wind_to_uv(speed, deg):
-    # speed (kt), deg meteorological (from) -> u,v
+    if pd.isna(speed) or pd.isna(deg): return None, None
     theta = radians((270 - deg) % 360)
     return speed * cos(theta), speed * sin(theta)
 
 def uv_to_wind(u, v):
-    spd = (u**2 + v**2)**0.5
+    spd = np.sqrt(u**2 + v**2)
     theta = degrees(atan2(v, u))
     deg = (270 - theta) % 360
     return spd, deg
 
-def weighted_mean_list(vals, ws):
-    arr = np.array([np.nan if v is None else v for v in vals], dtype=float)
-    w = np.array(ws, dtype=float)
+def weighted_mean(vals, ws):
+    arr = np.array([np.nan if v is None else v for v in vals], float)
+    w = np.array(ws, float)
     mask = ~np.isnan(arr)
-    if mask.sum() == 0:
-        return None
-    return float((arr[mask] * w[mask]).sum() / w[mask].sum())
+    return float((arr[mask] * w[mask]).sum() / w[mask].sum()) if mask.sum() else np.nan
 
-# --------------------------
-# Fetchers
-# --------------------------
+# === Fetch BMKG ===
 @st.cache_data(ttl=REFRESH_TTL)
 def fetch_bmkg(adm4="35.15.17.2001", local_fallback="JSON_BMKG.txt"):
     url = "https://cuaca.bmkg.go.id/api/df/v1/forecast/adm"
-    params = {"adm1":"35","adm2":"35.15","adm3":"35.15.17","adm4":adm4}
+    params = {"adm1": "35", "adm2": "35.15", "adm3": "35.15.17", "adm4": adm4}
     try:
         r = requests.get(url, params=params, timeout=15, verify=False)
         r.raise_for_status()
@@ -100,388 +82,188 @@ def fetch_bmkg(adm4="35.15.17.2001", local_fallback="JSON_BMKG.txt"):
                 data = json.load(f)
         else:
             return {"status": "Unavailable"}
-    # parse defensively
     try:
         cuaca = data["data"][0]["cuaca"][0][0]
         return {"status": "OK", "raw": data, "cuaca": cuaca}
     except Exception:
         return {"status": "Unavailable", "raw": data}
 
-def fetch_openmeteo_model(model_name):
-    # model_name: "gfs", "ecmwf", "icon"
-    base = f"https://api.open-meteo.com/v1/{model_name}"
+# === BMKG Parser (versi fleksibel) ===
+def bmkg_cuaca_to_df(cuaca_list):
+    times, t, hu, tcc, ws, wd, vs = [], [], [], [], [], [], []
+    for c in cuaca_list:
+        # cari field waktu yang valid
+        dt_val = (
+            c.get("datetime") or c.get("date") or c.get("time")
+            or c.get("valid_time") or c.get("jamCuaca")
+        )
+        if isinstance(dt_val, (int, float)):
+            try:
+                dt_val = datetime.utcfromtimestamp(dt_val)
+            except Exception:
+                dt_val = None
+        elif isinstance(dt_val, str):
+            dt_val = dt_val.replace("Z", "+00:00").replace("T", " ")
+            try:
+                dt_val = pd.to_datetime(dt_val, utc=True)
+            except Exception:
+                dt_val = None
+        else:
+            dt_val = None
+        if dt_val is None:
+            continue
+
+        # ambil nilai umum
+        times.append(dt_val)
+        t.append(c.get("t") or c.get("temp") or c.get("temperature"))
+        hu.append(c.get("hu") or c.get("rh") or c.get("humidity"))
+        tcc.append(c.get("tcc") or c.get("cloud") or c.get("cloud_cover"))
+        ws.append(c.get("ws") or c.get("wind_speed"))
+        wd.append(c.get("wd_deg") or c.get("wind_dir") or c.get("wind_direction"))
+        vs.append(c.get("vs_text") or c.get("visibility") or "")
+
+    if not times:
+        return pd.DataFrame(columns=["time", "T_BMKG", "RH_BMKG", "CC_BMKG", "WS_BMKG", "WD_BMKG", "VIS_BMKG"])
+
+    df = pd.DataFrame({
+        "time": times, "T_BMKG": t, "RH_BMKG": hu, "CC_BMKG": tcc,
+        "WS_BMKG": ws, "WD_BMKG": wd, "VIS_BMKG": vs
+    })
+    return df.sort_values("time").reset_index(drop=True)
+
+# === Fetch OpenMeteo models ===
+def fetch_openmeteo_model(model):
+    base = f"https://api.open-meteo.com/v1/{model}"
     params = {
         "latitude": LAT, "longitude": LON,
         "hourly": "temperature_2m,relative_humidity_2m,cloud_cover,windspeed_10m,winddirection_10m,visibility",
         "forecast_days": 2, "timezone": "UTC"
     }
     try:
-        r = requests.get(base, params=params, timeout=20)
-        r.raise_for_status()
+        r = requests.get(base, params=params, timeout=15)
         return r.json()
     except Exception:
         return None
 
-# --------------------------
-# Utility: convert model JSON -> aligned DataFrame (hourly UTC)
-# --------------------------
-def om_json_to_df(openm_json, model_tag):
-    if not openm_json or "hourly" not in openm_json:
-        return None
-    h = openm_json["hourly"]
+def om_to_df(j, tag):
+    if not j or "hourly" not in j: return None
+    h = j["hourly"]
     df = pd.DataFrame({
         "time": pd.to_datetime(h["time"]),
-        f"T_{model_tag}": h.get("temperature_2m"),
-        f"RH_{model_tag}": h.get("relative_humidity_2m"),
-        f"CC_{model_tag}": h.get("cloud_cover"),
-        f"WS_{model_tag}": h.get("windspeed_10m"),
-        f"WD_{model_tag}": h.get("winddirection_10m"),
-        f"VIS_{model_tag}": h.get("visibility") if "visibility" in h else [None]*len(h["time"])
+        f"T_{tag}": h["temperature_2m"],
+        f"RH_{tag}": h["relative_humidity_2m"],
+        f"CC_{tag}": h["cloud_cover"],
+        f"WS_{tag}": h["windspeed_10m"],
+        f"WD_{tag}": h["winddirection_10m"],
+        f"VIS_{tag}": h.get("visibility", [None]*len(h["time"]))
     })
     return df
 
-# --------------------------
-# Convert BMKG cuaca list to hourly DF (approx)
-# --------------------------
-def bmkg_cuaca_to_df(cuaca_list):
-    # cuaca_list is list of dicts with keys datetime, t, hu, tcc, ws, wd_deg, vs_text etc.
-    times, t, hu, tcc, ws, wd, vs = [], [], [], [], [], [], []
-    for c in cuaca_list:
-        try:
-            times.append(pd.to_datetime(c["datetime"]))
-        except Exception:
-            # try Z replacement
-            times.append(pd.to_datetime(c["datetime"].replace("Z","+00:00")))
-        t.append(c.get("t"))
-        hu.append(c.get("hu"))
-        tcc.append(c.get("tcc"))
-        ws.append(c.get("ws"))
-        wd.append(c.get("wd_deg"))
-        vs.append(c.get("vs_text"))
-    df = pd.DataFrame({
-        "time": times, "T_BMKG": t, "RH_BMKG": hu, "CC_BMKG": tcc,
-        "WS_BMKG": ws, "WD_BMKG": wd, "VIS_BMKG": vs
-    })
-    return df
-
-# --------------------------
-# Weather text -> ICAO symbol (simple mapping)
-# --------------------------
-def weather_text_to_icao(text):
-    if not text: return ""
-    txt = text.lower()
-    if "petir" in txt or "thunder" in txt or "thunderstorm" in txt: return "TS"
-    if "hujan lebat" in txt or "heavy rain" in txt: return "+RA"
-    if "hujan" in txt or "rain" in txt: return "RA"
-    if "kabut" in txt or "fog" in txt: return "FG"
-    if "gerimis" in txt or "drizzle" in txt: return "DZ"
-    return ""
-
-# --------------------------
-# Fusion routine: build fused hourly DF for next N hours
-# --------------------------
+# === Fusion logic ===
 def build_fused_hourly(bmkg_obj, om_gfs, om_ecmwf, om_icon, hours=24, weights_norm=None):
-    # create dataframes
-    dfs = []
-    if om_gfs: dfs.append(om_json_to_df(om_gfs, "GFS"))
-    if om_ecmwf: dfs.append(om_json_to_df(om_ecmwf, "ECMWF"))
-    if om_icon: dfs.append(om_json_to_df(om_icon, "ICON"))
-    # merge on time
+    dfs = [d for d in [om_to_df(om_gfs, "GFS"), om_to_df(om_ecmwf, "ECMWF"), om_to_df(om_icon, "ICON")] if d is not None]
     if not dfs:
         return None
-    df = dfs[0][["time"]].copy()
-    for d in dfs:
-        df = pd.merge(df, d, on="time", how="outer")
+    df = dfs[0][["time"]]
+    for d in dfs: df = pd.merge(df, d, on="time", how="outer")
     df = df.sort_values("time").reset_index(drop=True)
 
-    # BMKG
     if bmkg_obj and bmkg_obj.get("status") == "OK":
         df_b = bmkg_cuaca_to_df(bmkg_obj["cuaca"])
         df = pd.merge(df, df_b, on="time", how="outer")
 
-    # Now for each time, compute fused variables by weights_norm
-    # variables: temperature (T), RH, cloud cover (CC), wind speed/direction (WS/WD), visibility (VIS)
     rows = []
-    for _, row in df.iterrows():
-        t_vals = []
-        rh_vals = []
-        cc_vals = []
-        ws_u_vals = []  # u components
-        ws_v_vals = []
-        vis_vals = []
-        w_list = []
-        # BMKG
-        if bmkg_obj and bmkg_obj.get("status") == "OK":
-            w = weights_norm.get("bmkg", 0.0)
-            t_vals.append(row.get("T_BMKG"))
-            rh_vals.append(row.get("RH_BMKG"))
-            cc_vals.append(row.get("CC_BMKG"))
-            vis_text = row.get("VIS_BMKG")
-            vis_m = None
-            if isinstance(vis_text, str):
-                try:
-                    if ">" in vis_text:
-                        vis_m = float(vis_text.replace(">","").strip())*1000
-                    elif "km" in vis_text:
-                        vis_m = float(vis_text.replace("km","").strip())*1000
-                    else:
-                        vis_m = float(vis_text)
-                except Exception:
-                    vis_m = None
-            vis_vals.append(vis_m)
-            ws = row.get("WS_BMKG")
-            wd = row.get("WD_BMKG")
-            if pd.notna(ws) and pd.notna(wd):
-                u,v = wind_to_uv(ws, wd)
-                ws_u_vals.append(u); ws_v_vals.append(v)
-            w_list.append(w)
-        # Open-Meteo models
-        for key in ["ECMWF", "ICON", "GFS"]:
-            tag = key
-            w = weights_norm.get(key.lower(), 0.0)
-            if w <= 0: 
-                continue
-            t_val = row.get(f"T_{tag}") if f"T_{tag}" in row.index else None
-            rh_val = row.get(f"RH_{tag}") if f"RH_{tag}" in row.index else None
-            cc_val = row.get(f"CC_{tag}") if f"CC_{tag}" in row.index else None
-            ws_val = row.get(f"WS_{tag}") if f"WS_{tag}" in row.index else None
-            wd_val = row.get(f"WD_{tag}") if f"WD_{tag}" in row.index else None
-            vis_val = row.get(f"VIS_{tag}") if f"VIS_{tag}" in row.index else None
-            t_vals.append(t_val); rh_vals.append(rh_val); cc_vals.append(cc_val)
-            vis_vals.append(vis_val)
-            if pd.notna(ws_val) and pd.notna(wd_val):
-                u,v = wind_to_uv(ws_val, wd_val)
-                ws_u_vals.append(u); ws_v_vals.append(v)
-            w_list.append(w)
-        # If no weights (all zeros), skip
-        if not w_list:
-            continue
-        # For each variable, compute weighted mean (skip NaN)
-        def wmean(vals):
-            return weighted_mean_list(vals, w_list)
-        T_f = wmean(t_vals)
-        RH_f = wmean(rh_vals)
-        CC_f = wmean(cc_vals)
-        VIS_f = wmean(vis_vals)
-        # Wind via vector mean
-        U_f = weighted_mean_list(ws_u_vals, w_list) if ws_u_vals else None
-        V_f = weighted_mean_list(ws_v_vals, w_list) if ws_v_vals else None
-        if U_f is None or V_f is None:
-            WS_f = None; WD_f = None
-        else:
-            WS_f, WD_f = uv_to_wind(U_f, V_f)
-        rows.append({
-            "time": row["time"], "T": T_f, "RH": RH_f, "CC": CC_f, "VIS": VIS_f,
-            "WS": WS_f, "WD": WD_f
-        })
-    df_fused = pd.DataFrame(rows).dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-    # keep only next `hours` hours from now (UTC)
-    now = pd.to_datetime(datetime.utcnow()).floor('H')
-    df_fused = df_fused[df_fused["time"] >= now].head(hours)
-    return df_fused
+    for _, r in df.iterrows():
+        T_vals, RH_vals, CC_vals, VIS_vals, U_vals, V_vals, w = [], [], [], [], [], [], []
+        for key in ["bmkg", "ecmwf", "icon", "gfs"]:
+            wt = weights_norm.get(key, 0)
+            tag = key.upper()
+            t = r.get(f"T_{tag}") if tag != "BMKG" else r.get("T_BMKG")
+            rh = r.get(f"RH_{tag}") if tag != "BMKG" else r.get("RH_BMKG")
+            cc = r.get(f"CC_{tag}") if tag != "BMKG" else r.get("CC_BMKG")
+            vis = r.get(f"VIS_{tag}") if tag != "BMKG" else r.get("VIS_BMKG")
+            ws = r.get(f"WS_{tag}") if tag != "BMKG" else r.get("WS_BMKG")
+            wd = r.get(f"WD_{tag}") if tag != "BMKG" else r.get("WD_BMKG")
+            if t is not None: T_vals.append(t)
+            if rh is not None: RH_vals.append(rh)
+            if cc is not None: CC_vals.append(cc)
+            if vis is not None:
+                try: VIS_vals.append(float(vis))
+                except: VIS_vals.append(None)
+            if ws and wd:
+                u, v = wind_to_uv(ws, wd)
+                if u and v:
+                    U_vals.append(u); V_vals.append(v)
+            w.append(wt)
+        if not w: continue
+        T_f = weighted_mean(T_vals, w)
+        RH_f = weighted_mean(RH_vals, w)
+        CC_f = weighted_mean(CC_vals, w)
+        VIS_f = weighted_mean(VIS_vals, w)
+        U_f = weighted_mean(U_vals, w)
+        V_f = weighted_mean(V_vals, w)
+        WS_f, WD_f = uv_to_wind(U_f, V_f)
+        rows.append({"time": r["time"], "T": T_f, "RH": RH_f, "CC": CC_f, "VIS": VIS_f, "WS": WS_f, "WD": WD_f})
 
-# --------------------------
-# Build TAFOR from fused hourly DF
-# --------------------------
-def tcc_to_cloud_group(cc):
+    df_fused = pd.DataFrame(rows).dropna(subset=["time"])
+    now = pd.to_datetime(datetime.utcnow()).floor("H")
+    return df_fused[df_fused["time"] >= now].head(hours)
+
+# === TAFOR builder ===
+def tcc_to_cloud(cc):
     if cc is None: return "FEW020"
-    try:
-        c = float(cc)
-    except:
-        return "FEW020"
-    if c < 25: return "FEW020"
-    elif c < 50: return "SCT025"
-    elif c < 85: return "BKN030"
+    cc = float(cc)
+    if cc < 25: return "FEW020"
+    elif cc < 50: return "SCT025"
+    elif cc < 85: return "BKN030"
     else: return "OVC030"
 
-def build_tafor_from_fused(df_fused, issue_dt, valid_hours=24):
-    """
-    Heuristic TAFOR builder:
-    - baseline: first hour's fused fields
-    - TEMPO if any short-lived significant events (<3h clusters)
-    - BECMG if sustained trend (>=3h) change
-    Uses conservative thresholds:
-      * precipitation implied if CC>=80 and RH>=85 -> -RA
-      * TS if CC>=80 and RH>=90 and WS variability high -> TS
-      * reduced vis if VIS < 5000 m
-    """
-    if df_fused is None or df_fused.empty:
-        return ["TAF WARR " + issue_dt.strftime("%d%H%MZ") + f" {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=valid_hours)).strftime('%d%H')}",
+def build_tafor(df, issue_dt, validity=24):
+    if df is None or df.empty:
+        return ["TAF WARR " + issue_dt.strftime("%d%H%MZ") + f" {issue_dt:%d%H}/{(issue_dt+timedelta(hours=validity)):%d%H}",
                 "9999 FEW020", "NOSIG"]
+    header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt+timedelta(hours=validity)):%d%H}"
+    first = df.iloc[0]
+    wind = f"{int(first.WD):03d}{int(round(first.WS or 5)):02d}KT"
+    vis = str(int(first.VIS or 9999))
+    cloud = tcc_to_cloud(first.CC)
+    taf = [header, f"{wind} {vis} {cloud}"]
+    df["precip"] = (df["CC"] > 80) & (df["RH"] > 85)
+    for i, row in df.iterrows():
+        if row.precip:
+            taf.append(f"TEMPO {row.time:%d%H}/{(row.time+timedelta(hours=2)):%d%H} 4000 -RA SCT020CB")
+            break
+    if len(taf) == 2: taf.append("NOSIG")
+    return taf
 
-    header = f"TAF WARR {issue_dt.strftime('%d%H%MZ')} {issue_dt.strftime('%d%H')}/{(issue_dt+timedelta(hours=valid_hours)).strftime('%d%H')}"
-    # baseline from first row
-    first = df_fused.iloc[0]
-    wind = f"{int(first.WD):03d}{int(round(float(first.WS or 5))):02d}KT" if pd.notna(first.WS) else "09005KT"
-    vis_val = int(first.VIS) if pd.notna(first.VIS) else 9999
-    vis = str(vis_val)
-    cloud = tcc_to_cloud_group(first.CC)
-    baseline = f"{wind} {vis} {cloud}"
-
-    lines = [header, baseline]
-
-    # scan for significant hours (rain/ts/fog)
-    df = df_fused.copy()
-    df["precip_flag"] = ((df["CC"] >= 80) & (df["RH"] >= 85))
-    df["ts_flag"] = ((df["CC"] >= 85) & (df["RH"] >= 90) & (df["WS"] >= 15))
-    df["lowvis_flag"] = (df["VIS"].notna()) & (df["VIS"] < 5000)
-
-    # find contiguous clusters for precip / ts / lowvis
-    def clusters(flag_series):
-        clusters = []
-        current = None
-        for i, f in enumerate(flag_series):
-            t = df.iloc[i]["time"]
-            if f:
-                if current is None:
-                    current = {"start": t, "end": t}
-                else:
-                    current["end"] = t
-            else:
-                if current is not None:
-                    clusters.append(current)
-                    current = None
-        if current is not None:
-            clusters.append(current)
-        return clusters
-
-    precip_clusters = clusters(df["precip_flag"].tolist())
-    ts_clusters = clusters(df["ts_flag"].tolist())
-    lowvis_clusters = clusters(df["lowvis_flag"].tolist())
-
-    # TEMPO for short clusters (<3h), BECMG for sustained (>=3h)
-    def cluster_to_group(cluster):
-        # cluster={"start": datetime, "end": datetime}
-        # produce string in format: TEMPO/BECMG DDHH/DDHH ...
-        start, end = cluster["start"], cluster["end"]
-        dur_hours = int(((end - start).total_seconds() // 3600) + 1)
-        if dur_hours < 3:
-            # tempo
-            return ("TEMPO", start, end)
-        else:
-            return ("BECMG", start, end)
-
-    # apply for precip
-    for cl in precip_clusters:
-        typ, s, e = cluster_to_group(cl)
-        # choose wording "-RA" and lowered vis
-        if typ == "TEMPO":
-            lines.append(f"TEMPO {s.strftime('%d%H')}/{e.strftime('%d%H')} 4000 -RA SCT020CB")
-        else:
-            lines.append(f"BECMG {s.strftime('%d%H')}/{e.strftime('%d%H')} 20005KT 8000 -RA BKN025")
-
-    for cl in ts_clusters:
-        typ, s, e = cluster_to_group(cl)
-        if typ == "TEMPO":
-            lines.append(f"TEMPO {s.strftime('%d%H')}/{e.strftime('%d%H')} 3000 TSRA SCT020CB")
-        else:
-            lines.append(f"BECMG {s.strftime('%d%H')}/{e.strftime('%d%H')} VRB25G35KT TSRA")
-
-    for cl in lowvis_clusters:
-        typ, s, e = cluster_to_group(cl)
-        if typ == "TEMPO":
-            lines.append(f"TEMPO {s.strftime('%d%H')}/{e.strftime('%d%H')} 2000 -BR")
-        else:
-            lines.append(f"BECMG {s.strftime('%d%H')}/{e.strftime('%d%H')} 2000 FG")
-
-    # If no change groups -> add NOSIG
-    if len(lines) == 2:
-        lines.append("NOSIG")
-
-    return lines
-
-# --------------------------
-# Main action
-# --------------------------
+# === Main Action ===
 if st.button("🚀 Generate TAFOR (Fusion)"):
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
     valid_to = issue_dt + timedelta(hours=validity)
+    st.info("🔎 Mengambil data model...")
 
-    st.info("🔎 Mengambil data: BMKG & OpenMeteo (GFS/ECMWF/ICON)...")
     bmkg_obj = fetch_bmkg()
-    om_gfs = fetch_openmeteo_model("gfs")
-    om_ecmwf = fetch_openmeteo_model("ecmwf")
-    om_icon = fetch_openmeteo_model("icon")
+    om_gfs, om_ecmwf, om_icon = fetch_openmeteo_model("gfs"), fetch_openmeteo_model("ecmwf"), fetch_openmeteo_model("icon")
 
-    st.success("✅ Data diambil (atau fallback digunakan jika API gagal).")
+    st.success("✅ Data diterima, fusi sedang diproses...")
+    df_fused = build_fused_hourly(bmkg_obj, om_gfs, om_ecmwf, om_icon, validity, norm_weights)
+    taf = build_tafor(df_fused, issue_dt, validity)
+    taf_html = "<br>".join(taf)
 
-    st.info("🔀 Melakukan fusi multi-model (berbobot)...")
-    # build fused df (next 24 hours by default)
-    df_fused = build_fused_hourly(bmkg_obj, om_gfs, om_ecmwf, om_icon, hours=validity, weights_norm=norm_weights)
-    if df_fused is None or df_fused.empty:
-        st.error("Data model tidak tersedia / fusi gagal.")
-        st.stop()
+    st.subheader("📊 Ringkasan Sumber")
+    st.write(f"| Sumber | Status |\n|:--|:--|\n| BMKG ADM4 | {'OK' if bmkg_obj and bmkg_obj.get('status')=='OK' else 'Unavailable'} |\n| GFS | {'OK' if om_gfs else 'Unavailable'} |\n| ECMWF | {'OK' if om_ecmwf else 'Unavailable'} |\n| ICON | {'OK' if om_icon else 'Unavailable'} |")
 
-    st.success("✅ Fusi selesai.")
+    st.markdown("### 📝 Hasil TAFOR (Auto Fusion)")
+    st.markdown(f"<div style='padding:15px;border:2px solid #555;border-radius:10px;background:#f9f9f9'><p style='font-family:monospace;font-weight:700'>{taf_html}</p></div>", unsafe_allow_html=True)
 
-    # build tafor
-    taf_lines = build_tafor_from_fused(df_fused, issue_dt, valid_hours=validity)
-    taf_html = "<br>".join(taf_lines)
-
-    # display source summary
-    st.subheader("📊 Ringkasan Sumber Data")
-    st.write(f"""
-    | Sumber | Status |
-    |:-------|:--------|
-    | BMKG ADM4 | {'OK' if bmkg_obj and bmkg_obj.get('status')=='OK' else 'Unavailable'} |
-    | Open-Meteo GFS | {'OK' if om_gfs else 'Unavailable'} |
-    | Open-Meteo ECMWF | {'OK' if om_ecmwf else 'Unavailable'} |
-    | Open-Meteo ICON | {'OK' if om_icon else 'Unavailable'} |
-    """)
-
-    # METAR input / OGIMET note
-    st.markdown("### 📡 METAR (observasi — optional)")
-    st.markdown("<div style='padding:10px;border:2px solid #bbb;border-radius:10px;background:#fafafa;'><p style='font-family:monospace;'>Optional manual METAR input is respected in TAF decisions if provided.</p></div>", unsafe_allow_html=True)
-
-    # Show TAF
-    st.markdown("### 📝 Hasil TAFOR (WARR — Sedati Gede / Juanda)")
-    st.markdown(f"<div style='padding:15px;border:2px solid #555;border-radius:10px;background:#f9f9f9;'><p style='font-family:monospace;font-weight:700;'>{taf_html}</p></div>", unsafe_allow_html=True)
-
-    # Display trend and short narrative
-    st.markdown("### 🌦️ TREND / Narasi singkat")
-    # Build simple trend: if first 1h has precip_flag -> TEMPO TL...
-    first_hour = df_fused.iloc[0]
-    precip_now = (first_hour.CC >= 80 and first_hour.RH >= 85)
-    if precip_now:
-        trend = f"TEMPO TL{(issue_dt+timedelta(hours=1)).strftime('%d%H%M')} 4000 -RA"
-    else:
-        trend = "NOSIG"
-    st.markdown(f"<div style='padding:12px;border:2px solid #777;border-radius:10px;background:#f4f4f4;'><p style='font-family:monospace;font-weight:700;'>{trend}</p></div>", unsafe_allow_html=True)
-
-    # Model analysis block
-    st.markdown("### 🧠 Analisis Model (Fusi)")
-    try:
-        now = df_fused.iloc[0]
-        sky = "Cerah" if now.CC < 25 else "Berawan" if now.CC < 70 else "Tertutup"
-        hum = "Kering" if now.RH < 60 else "Lembap" if now.RH < 80 else "Basah"
-        st.markdown(f"""
-        <div style='padding:12px;border:2px solid #888;border-radius:10px;background:#f6f6f6;'>
-            <b>Jam referensi:</b> {now.time:%Y-%m-%d %H:%M UTC}<br>
-            <b>Temp (fused):</b> {now.T:.1f} °C &nbsp;&nbsp; <b>RH:</b> {now.RH:.0f}% ({hum})<br>
-            <b>Tutupan awan:</b> {now.CC:.0f}% ({sky})<br>
-            <b>Angin:</b> {int(now.WD):03d}/{now.WS:.1f} kt<br>
-            <b>Interpretasi:</b> {'Fenomena signifikan terdeteksi (hujan/konveksi)' if precip_now else 'Tidak ada cuaca signifikan terdeteksi'}.
-        </div>
-        """, unsafe_allow_html=True)
-    except Exception:
-        st.info("Analisis model tidak tersedia.")
-
-    # Plot fused chart (24h)
-    st.markdown("### 📈 Grafik Fusi 24 jam (T / RH / Cloud / WS)")
-    try:
+    if df_fused is not None and not df_fused.empty:
         fig, ax = plt.subplots(figsize=(9,4))
         ax.plot(df_fused["time"], df_fused["T"], label="T (°C)")
         ax.plot(df_fused["time"], df_fused["RH"], label="RH (%)")
         ax.plot(df_fused["time"], df_fused["CC"], label="Cloud (%)")
         ax.plot(df_fused["time"], df_fused["WS"], label="Wind Speed (kt)")
-        ax.set_xlabel("UTC time"); plt.xticks(rotation=35)
-        ax.legend(loc="upper left")
+        ax.legend(); plt.xticks(rotation=35)
         st.pyplot(fig)
-    except Exception as e:
-        st.warning(f"Gagal plot: {e}")
 
-    # Debug / JSON
-    with st.expander("🔎 Debug / Fused JSON"):
-        st.write(df_fused.to_dict(orient="records"))
-
-    st.info("⚠️ Hati-hati: TAFOR otomatis ini bersifat eksperimental. Selalu validasi oleh forecaster resmi sebelum publikasi operasional.")
+    with st.expander("🔍 Debug: JSON BMKG Mentah"):
+        st.write(bmkg_obj)
