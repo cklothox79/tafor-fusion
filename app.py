@@ -200,11 +200,15 @@ def build_fused(bmkg, gfs, ecmwf, icon, w, hours=24):
     if bmkg and bmkg.get("status") == "OK":
         df_b = bmkg_to_df_sedatigede(bmkg["cuaca"])
         df_b = normalize_time(df_b)
-        if df_b is not None and not df_b.empty:
-            try:
-                df = pd.merge(df, df_b, on="time", how="outer")
-            except Exception as e:
-                st.warning(f"⚠️ BMKG merge skipped: {e}")
+
+    if df_b is not None and not df_b.empty:
+       # pastikan semua waktu sama-sama naive (tanpa zona waktu)
+       df_b["time"] = pd.to_datetime(df_b["time"], utc=True).dt.tz_convert(None)
+       df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(None)
+       try:
+        df = pd.merge(df, df_b, on="time", how="outer")
+       except Exception as e:
+        st.warning(f"⚠️ BMKG merge skipped: {e}")
     else:
         st.info("ℹ️ BMKG data unavailable — using Open-Meteo only")
 
