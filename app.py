@@ -162,28 +162,49 @@ def fetch_metar_ogimet(station="WARR"):
 
 # === Fusion ===
 def build_fused(bmkg, gfs, ecmwf, icon, w, hours=24):
-    dfs = [d for d in [om_to_df(gfs, "GFS"), om_to_df(ecmwf, "ECMWF"), om_to_df(icon, "ICON")] if d is not None]
+    """Gabungkan data dari BMKG dan tiga model Open-Meteo dengan bobot ensemble"""
+
+    # helper: paksa time menjadi datetime dan buang null
+    def normalize_time(df):
+        if df is not None and "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], errors="coerce")
+            df = df.dropna(subset=["time"])
+        return df
+
+    # ambil model-model openmeteo
+    dfs = [normalize_time(d) for d in [om_to_df(gfs, "GFS"),
+                                       om_to_df(ecmwf, "ECMWF"),
+                                       om_to_df(icon, "ICON")] if d is not None]
+
     if not dfs:
         return None
 
-    # pastikan semua kolom time bertipe datetime
-    for d in dfs:
-        if "time" in d.columns:
-            d["time"] = pd.to_datetime(d["time"], errors="coerce")
+    # merge model-model openmeteo
     df = dfs[0][["time"]]
     for d in dfs[1:]:
-        df = pd.merge(df, d, on="time", how="outer")
+        if d is not None:
+            df = pd.merge(df, d, on="time", how="outer")
 
-    # tambahkan BMKG jika ada
+    # tambahkan BMKG (jika ada)
     if bmkg and bmkg.get("status") == "OK":
         df_b = bmkg_to_df_sedatigede(bmkg["cuaca"])
-        if not df_b.empty:
-            df_b["time"] = pd.to_datetime(df_b["time"], errors="coerce")
-            df = pd.merge(df, df_b, on="time", how="outer")
+        df_b = normalize_time(df_b)
+        if df_b is not None and not df_b.empty:
+            try:
+                df = pd.merge(df, df_b, on="time", how="outer")
+            except Exception as e:
+                st.warning(f"⚠️ BMKG merge skipped: {e}")
+    else:
+        st.info("ℹ️ BMKG data unavailable — using Open-Meteo only")
 
-    # drop baris tanpa waktu valid
-    df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+    # bersihkan dan urutkan
+    df = normalize_time(df)
+    if df.empty:
+        return None
 
+    df = df.sort_values("time").reset_index(drop=True)
+
+    # proses fusi berbobot
     out = []
     for _, r in df.iterrows():
         vals = {"T": [], "RH": [], "CC": [], "VIS": [], "U": [], "V": [], "w": []}
@@ -197,24 +218,18 @@ def build_fused(bmkg, gfs, ecmwf, icon, w, hours=24):
             ws = r.get(f"WS_{tag}") if tag != "BMKG" else r.get("WS_BMKG")
             wd = r.get(f"WD_{tag}") if tag != "BMKG" else r.get("WD_BMKG")
 
-            if t is not None:
-                vals["T"].append(t)
-            if rh is not None:
-                vals["RH"].append(rh)
-            if cc is not None:
-                vals["CC"].append(cc)
+            if t is not None: vals["T"].append(t)
+            if rh is not None: vals["RH"].append(rh)
+            if cc is not None: vals["CC"].append(cc)
             if vis:
-                try:
-                    vals["VIS"].append(float(vis))
-                except:
-                    pass
+                try: vals["VIS"].append(float(vis))
+                except: pass
             if ws and wd:
                 u, v = wind_to_uv(ws, wd)
-                vals["U"].append(u)
-                vals["V"].append(v)
+                vals["U"].append(u); vals["V"].append(v)
             vals["w"].append(wt)
 
-        if not vals["w"]:
+        if not vals["w"]: 
             continue
 
         ws_ = vals["w"]
@@ -225,21 +240,19 @@ def build_fused(bmkg, gfs, ecmwf, icon, w, hours=24):
         U = weighted_mean(vals["U"], ws_)
         V = weighted_mean(vals["V"], ws_)
         WS, WD = uv_to_wind(U, V)
+
         out.append({
             "time": r["time"],
-            "T": T,
-            "RH": RH,
-            "CC": CC,
-            "VIS": VIS,
-            "WS": WS,
-            "WD": WD
+            "T": T, "RH": RH, "CC": CC, "VIS": VIS, "WS": WS, "WD": WD
         })
 
     df_out = pd.DataFrame(out)
     if df_out.empty:
         return None
+
     now = pd.to_datetime(datetime.utcnow()).floor("H")
     return df_out[df_out["time"] >= now].head(hours)
+
 
 # === TAFOR builder ===
 def tcc_to_cloud(cc):
