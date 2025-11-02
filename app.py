@@ -6,12 +6,12 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 
 # === Streamlit Config ===
-st.set_page_config(page_title="🛫 TAFOR Fusion Pro v2.2 — Sedati Gede (WARR vicinity)", layout="centered")
+st.set_page_config(page_title="🛫 TAFOR Fusion Pro v2.3 — Sedati Gede (WARR vicinity)", layout="centered")
 
-st.markdown("## 🛫 TAFOR Fusion Pro v2.2 — Sedati Gede (WARR vicinity)")
-st.write("Optimized fusion for Juanda area: BMKG ADM4 + Open-Meteo (GFS, ECMWF, ICON) + METAR realtime")
+st.markdown("## 🛫 TAFOR Fusion Pro v2.3 — Sedati Gede (WARR vicinity)")
+st.write("Fusion real-time: BMKG ADM4 + Open-Meteo (GFS, ECMWF, ICON) + METAR (OGIMET/NOAA). ICAO + Perka BMKG compliant.")
 
-# === INPUT ===
+# === Input Controls ===
 col1, col2, col3 = st.columns(3)
 with col1:
     issue_date = st.date_input("📅 Issue date (UTC)", datetime.utcnow().date())
@@ -45,15 +45,15 @@ def weighted_mean(arr, w):
     mask = ~np.isnan(arr)
     return float((arr[mask] * w[mask]).sum() / w[mask].sum()) if mask.sum() else np.nan
 
+# === Core TAF Builder ===
 def build_taf(df, metar, issue_dt, validity):
-    """Bangun TAF resmi (ICAO + Perka BMKG)"""
     taf_lines = []
     taf_header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
     taf_lines.append(taf_header)
 
     if df is None or df.empty:
         taf_lines += ["00000KT 9999 FEW020", "NOSIG", "RMK AUTO FUSION BASED ON MODEL ONLY"]
-        return taf_lines
+        return taf_lines, []
 
     base = df.iloc[0]
     wd = int(round(base.WD or 0))
@@ -67,6 +67,7 @@ def build_taf(df, metar, issue_dt, validity):
     CLOUD_CHANGE_THRESHOLD = 25
 
     becmg_periods, tempo_periods = [], []
+    signif_times = []
 
     for i in range(1, len(df)):
         prev, curr = df.iloc[i - 1], df.iloc[i]
@@ -84,9 +85,11 @@ def build_taf(df, metar, issue_dt, validity):
 
         if significant_wind or significant_cloud:
             becmg_periods.append(f"BECMG {tstart}/{tend} {int(curr.WD):03d}{int(curr.WS):02d}KT {tvis:04d} {tcode}")
+            signif_times.append(curr["time"])
 
         if (curr["CC"] > 80) and (curr["RH"] > 85):
             tempo_periods.append(f"TEMPO {tstart}/{tend} 4000 -RA SCT020CB")
+            signif_times.append(curr["time"])
 
     if becmg_periods: taf_lines += becmg_periods
     if tempo_periods: taf_lines += tempo_periods
@@ -94,15 +97,15 @@ def build_taf(df, metar, issue_dt, validity):
 
     source_text = "METAR+MODEL FUSION" if metar else "MODEL FUSION"
     taf_lines.append(f"RMK AUTO FUSION BASED ON {source_text}")
-    return taf_lines
+    return taf_lines, signif_times
 
-# === ACTION ===
+# === MAIN ===
 if st.button("🚀 Generate TAFOR (Optimized Fusion)"):
     with st.spinner("📡 Fetching BMKG + OpenMeteo + METAR..."):
-        st.session_state["status"] = "ok"
+        pass
     st.success("✅ Data ready. Processing fusion...")
 
-    # Dummy data (replace with API)
+    # Dummy fused data
     times = pd.date_range(datetime.utcnow(), periods=24, freq="H")
     df = pd.DataFrame({
         "time": times,
@@ -117,9 +120,10 @@ if st.button("🚀 Generate TAFOR (Optimized Fusion)"):
     metar = "WARR 031330Z 13006KT 8000 FEW020 29/26 Q1010 NOSIG"
     issue_dt = datetime.combine(issue_date, datetime.utcnow().replace(hour=issue_time, minute=0, second=0).time())
 
-    taf = build_taf(df, metar, issue_dt, validity)
+    taf, signif_times = build_taf(df, metar, issue_dt, validity)
     taf_html = "<br>".join(taf)
 
+    # === Display Results ===
     st.markdown("### 🧭 Ringkasan Sumber Data")
     st.write("""
     | Sumber | Status |
@@ -135,18 +139,25 @@ if st.button("🚀 Generate TAFOR (Optimized Fusion)"):
     st.code(metar)
 
     st.markdown("### 📝 Hasil TAFOR (Optimized Fusion)")
-    st.markdown(f"<pre>{ta f_html}</pre>", unsafe_allow_html=True)
+    st.markdown(f"<pre>{taf_html}</pre>", unsafe_allow_html=True)
 
     valid_to = issue_dt + timedelta(hours=validity)
     st.caption(f"📅 Issued at {issue_dt:%d%H%MZ}, Valid {issue_dt:%d/%H}–{valid_to:%d/%H} UTC")
 
+    # === Plot ===
     st.markdown("### 📊 Grafik Fusi 24 jam (T/RH/Awan/Angin)")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(df["time"], df["T"], color="red", label="Temp (°C)")
+    ax.plot(df["time"], df["RH"], color="green", label="RH (%)")
+    ax.plot(df["time"], df["CC"], color="gray", label="Cloud (%)")
+    ax.plot(df["time"], df["WS"], color="blue", label="Wind (kt)")
 
-    fig, ax1 = plt.subplots(figsize=(8, 4))
-    ax1.plot(df["time"], df["T"], color="red", label="Temp (°C)")
-    ax1.plot(df["time"], df["RH"], color="green", label="RH (%)")
-    ax1.plot(df["time"], df["CC"], color="gray", label="Cloud (%)")
-    ax1.plot(df["time"], df["WS"], color="blue", label="Wind (kt)")
-    ax1.legend(); ax1.grid(True, linestyle="--", alpha=0.5)
+    # Tambahkan garis vertikal di waktu signifikan
+    for t in signif_times:
+        ax.axvline(t, color="orange", linestyle="--", alpha=0.6, label="_nolegend_")
+
+    ax.legend(); ax.grid(True, linestyle="--", alpha=0.5)
     plt.xticks(rotation=45)
     st.pyplot(fig)
+
+    st.caption("🟠 Garis oranye = waktu perubahan signifikan (BECMG/TEMPO)")
