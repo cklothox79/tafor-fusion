@@ -9,3 +9,13 @@ Sumber data:
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+
+Fungsi utama
+
+Mengambil data 4 model (BMKG, GFS, ECMWF, ICON)
+
+Melakukan fusi berbobot (BMKG prioritas)
+
+Menampilkan hasil numerik dan grafik 24 jam
+
+Menyediakan interpretasi otomatis
