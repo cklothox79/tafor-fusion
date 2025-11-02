@@ -278,20 +278,45 @@ def tcc_to_cloud(cc):
     elif cc<85: return "BKN030"
     else: return "OVC030"
 
-def build_taf(df,metar,issue_dt,validity):
-    header=f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt+timedelta(hours=validity)):%d%H}"
+def build_taf(df, metar, issue_dt, validity):
+    """Buat teks TAF berdasarkan hasil fusi dan METAR"""
+    header = f"TAF WARR {issue_dt:%d%H%MZ} {issue_dt:%d%H}/{(issue_dt + timedelta(hours=validity)):%d%H}"
+
     if df is None or df.empty:
-        return [header,"9999 FEW020","NOSIG"]
-    base=df.iloc[0]
-    wind=f"{int(base.WD):03d}{int(round(base.WS or 5)):02d}KT"
-    vis=str(int(base.VIS or 9999))
-    cloud=tcc_to_cloud(base.CC)
-    taf=[header,f"{wind} {vis} {cloud}"]
-    df["precip"]=(df["CC"]>80)&(df["RH"]>85)
-    if any(df["precip"]): taf.append("TEMPO 4000 -RA SCT020CB")
-    else: taf.append("NOSIG")
+        return [header, "9999 FEW020", "NOSIG"]
+
+    base = df.iloc[0]
+
+    # --- wind ---
+    wind_dir = int(round(base.WD or 0)) if not pd.isna(base.WD) else 0
+    wind_spd = int(round(base.WS or 5)) if not pd.isna(base.WS) else 5
+    wind = f"{wind_dir:03d}{wind_spd:02d}KT"
+
+    # --- visibility ---
+    vis = base.VIS
+    try:
+        vis_val = int(float(vis)) if not pd.isna(vis) else 9999
+        if vis_val <= 0:
+            vis_val = 9999
+    except Exception:
+        vis_val = 9999
+    vis = str(vis_val)
+
+    # --- clouds ---
+    cloud = tcc_to_cloud(base.CC)
+
+    taf = [header, f"{wind} {vis} {cloud}"]
+
+    # --- weather logic ---
+    df["precip"] = (df["CC"] > 80) & (df["RH"] > 85)
+    if any(df["precip"]):
+        taf.append("TEMPO 4000 -RA SCT020CB")
+    else:
+        taf.append("NOSIG")
+
     taf.append(f"RMK BASED ON {'METAR' if metar else 'MODEL FUSION'}")
     return taf
+
 
 # === Run ===
 if st.button("🚀 Generate TAFOR (Optimized Fusion)"):
